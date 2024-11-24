@@ -1,0 +1,163 @@
+library(dplyr)
+
+suppress_data <- function(data) {
+  # Step 1: Calculate thresholds
+  dat <- data %>%
+    group_by(institution_type) %>%
+    mutate(
+      denominator = sum(n_individuals),
+      denominator_threshold = denominator < 30,
+      numerator_threshold = n_individuals < 11 & n_individuals != 0L
+    ) %>%
+    ungroup()
+  
+  # Step 2: Add suppression flags
+  dat <- dat %>%
+    group_by(institution_type) %>%
+    mutate(
+      suppressed_institution_type_total = sum(n_individuals * numerator_threshold),
+      institution_type_total = sum(n_individuals),
+      suppressed_institution_cells = sum(numerator_threshold | denominator_threshold)
+    ) %>%
+    ungroup() %>%
+    group_by(race) %>%
+    mutate(
+      suppressed_race_type_total = sum(n_individuals * numerator_threshold),
+      race_type_total = sum(n_individuals),
+      suppressed_race_cells = sum(numerator_threshold | denominator_threshold)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      final_suppression = numerator_threshold | denominator_threshold
+    )
+  
+  # Step 3: Complementary suppression
+  repeat {
+    # Identify cells requiring complementary suppression
+    comp_step <- dat %>%
+      filter(
+        ((suppressed_institution_type_total < 11 & suppressed_institution_type_total > 0) |
+           suppressed_race_cells == 1) |
+          ((suppressed_race_type_total < 11 & suppressed_race_type_total > 0) |
+             suppressed_institution_cells == 1),
+        n_individuals != 0,
+        !final_suppression
+      )
+    
+    if (nrow(comp_step) == 0) break  # Stop if no additional cells need suppression
+    
+    # Find the smallest cells for complementary suppression
+    smallest_cells <- comp_step %>%
+      group_by(institution_type, race) %>%
+      slice_min(order_by = n_individuals) %>%
+      pull(rn)
+    
+    # Update suppression flags
+    dat <- dat %>%
+      mutate(
+        final_suppression = final_suppression | rn %in% smallest_cells
+      ) %>%
+      group_by(institution_type) %>%
+      mutate(
+        suppressed_institution_type_total = sum(n_individuals * final_suppression),
+        suppressed_institution_cells = sum(final_suppression)
+      ) %>%
+      ungroup() %>%
+      group_by(race) %>%
+      mutate(
+        suppressed_race_type_total = sum(n_individuals * final_suppression),
+        suppressed_race_cells = sum(final_suppression)
+      ) %>%
+      ungroup()
+  }
+  
+  # Step 4: Validate suppression rules
+  suppression_checks <- dat %>%
+    summarise(
+      institution_check = all(
+        suppressed_institution_type_total >= 11 |
+          suppressed_institution_type_total == 0 |
+          suppressed_institution_type_total == institution_type_total
+      ),
+      race_check = all(
+        suppressed_race_type_total >= 11 |
+          suppressed_race_type_total == 0 |
+          suppressed_race_type_total == race_type_total
+      )
+    )
+  
+  if (!suppression_checks$institution_check) stop("Institution suppression validation failed")
+  if (!suppression_checks$race_check) stop("Race suppression validation failed")
+  
+  # Step 5: Output suppressed data
+  dat <- dat %>%
+    mutate(
+      suppressed_n = if_else(final_suppression, "*", as.character(n_individuals))
+    ) %>%
+    relocate(race, institution_type, n_individuals, suppressed_n, suppressed_institution_type_total, suppressed_race_type_total)
+  
+  return(dat)
+}
+
+
+run_test_case <- function(test_name, test_data) {
+  print(paste("Running:", test_name))
+  result <- suppress_data(test_data)
+  print(result)
+}
+
+# Test Case 9: All Groups Suppressed by Denominator Threshold
+test_data_9 <- expand.grid(
+  race = c("A", "B"),
+  institution_type = c("2-year", "4-year")
+) %>%
+  mutate(n_individuals = c(5, 5, 10, 8), rn = row_number())
+
+run_test_case("Test Case 9: All Groups Suppressed by Denominator Threshold", test_data_9)
+
+# Test Case 10: Groups Above Denominator Threshold
+test_data_10 <- expand.grid(
+  race = c("A", "B"),
+  institution_type = c("2-year", "4-year", "All")
+) %>%
+  mutate(n_individuals = c(15, 30, 5, 30, 45, 60), rn = row_number())
+
+run_test_case("Test Case 10: Groups Above Denominator Threshold", test_data_10)
+
+# Test Case 17: Single Cell Triggers Suppression
+test_data_17 <- expand.grid(
+  race = c("A", "B"),
+  institution_type = c("2-year", "4-year")
+) %>%
+  mutate(n_individuals = c(5, 25, 10, 35), rn = row_number())
+
+run_test_case("Test Case 17: Single Cell Triggers Suppression", test_data_17)
+
+# Test Case 19: Single Cell Per Group
+test_data_19 <- expand.grid(
+  race = c("A", "B", "C"),
+  institution_type = c("All")
+) %>%
+  mutate(n_individuals = c(10, 5, 12), rn = row_number())
+
+
+run_test_case("Test Case 19: Single Cell Per Group", test_data_19)
+
+# Test Case 30: Mixed Small and Large Values with Zero
+test_data_30 <- expand.grid(
+  race = c("A", "B", "C"),
+  institution_type = c("2-year", "4-year")
+) %>%
+  mutate(n_individuals = c(5, 0, 30, 20, 30, 0), rn = row_number())
+
+run_test_case("Test Case 30: Mixed Small and Large Values with Zero", test_data_30)
+
+# Test Case 34: Complementary Suppression in One Dimension
+test_data_34 <- expand.grid(
+  race = c("A", "B", "C", "D"),
+  institution_type = c("2-year", "4-year", "All", "Other")
+) %>%
+  mutate(n_individuals = c(5, 6, 10, 20, 25, 30, 35, 40, 7, 8, 6, 15, 20, 25, 30, 35), rn = row_number())
+
+run_test_case("Test Case 34: Complementary Suppression in One Dimension", test_data_34)
+
